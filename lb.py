@@ -18,11 +18,11 @@ class RetryMetrics:
     successful_requests: int = 0
     failed_requests: int = 0
     retry_attempts: int = 0
-    current_amplification: float = 1.0  # Current load amplification factor
-    retry_budget_remaining: float = 1.0  # Percentage of retry budget remaining
+    current_amplification: float = 1.0
+    retry_budget_remaining: float = 1.0
 
 class RetryBudget:
-    def __init__(self, ratio: float = 0.1):  # 10% retry budget
+    def __init__(self, ratio: float = 0.1):
         self.ratio = ratio
         self.success_count = 0
         self.retry_count = 0
@@ -66,7 +66,7 @@ class RetryableRequest:
     async def execute_with_retry(self, server) -> bool:
         initial_request = True
         while self.attempt_count <= self.max_retries:
-            if not initial_request:  # This is a retry
+            if not initial_request:
                 if not self.retry_budget.can_retry():
                     return False
 
@@ -113,13 +113,10 @@ class Server:
         self.queue = Queue(maxsize=capacity)
 
     async def simulate_processing(self, request_id: str) -> bool:
-        """Simulates request processing with load-aware failures"""
         try:
-            # Check server status first
             if self.status == ServerStatus.FAILED:
                 return False
 
-            # Try to add to queue
             try:
                 self.queue.put_nowait(request_id)
             except Full:
@@ -127,22 +124,18 @@ class Server:
 
             self.current_load += 1
 
-            # Calculate load-based failure probability
             load_ratio = self.current_load / self.capacity
-            failure_prob = max(0, (load_ratio - 0.6) * 2)  # Start failing at 60% load
+            failure_prob = max(0, (load_ratio - 0.6) * 2)
 
-            # Add extra failure probability if degraded
             if self.status == ServerStatus.DEGRADED:
-                failure_prob += 0.3  # 30% extra failure chance when degraded
+                failure_prob += 0.3
 
-            # Simulate processing with load-aware latency
             actual_time = self.processing_time * (1 + load_ratio * 2)
             if self.status == ServerStatus.DEGRADED:
-                actual_time *= 3  # 3x slower when degraded
+                actual_time *= 3
 
             await asyncio.sleep(actual_time)
 
-            # Determine if request fails
             if random.random() < failure_prob:
                 return False
 
@@ -154,43 +147,6 @@ class Server:
                 self.queue.get_nowait()
             except:
                 pass
-
-    async def execute_with_retry(self, server) -> bool:
-        while self.attempt_count <= self.max_retries:
-            if self.attempt_count > 0:
-                # Check retry budget before attempting retry
-                if not self.retry_budget.can_retry():
-                    print(f"Request {self.request_id} retry rejected - budget exceeded")
-                    return False
-
-                # Calculate delay with exponential backoff and jitter
-                delay = min(self.base_delay * (2 ** self.attempt_count), self.max_delay)
-                delay = random.uniform(0, delay)  # Full jitter
-                await asyncio.sleep(delay)
-
-                self.retry_budget.record_retry()
-                self.metrics.retry_attempts += 1
-                print(f"Request {self.request_id} retry attempt {self.attempt_count}")
-
-            try:
-                self.attempt_count += 1
-                self.metrics.total_requests += 1
-
-                success = await server.simulate_processing(self.request_id)
-
-                if success:
-                    self.retry_budget.record_success()
-                    self.metrics.successful_requests += 1
-                    return True
-                else:
-                    self.metrics.failed_requests += 1
-                    print(f"Request {self.request_id} failed, attempt {self.attempt_count}")
-
-            except Exception as e:
-                self.metrics.failed_requests += 1
-                print(f"Request {self.request_id} error: {str(e)}")
-
-        return False
 
 class MemoryLeakServer(Server):
     def __init__(self, *args, **kwargs):
@@ -204,61 +160,10 @@ class MemoryLeakServer(Server):
             print(f"Degradation factor: {self.processing_time / 0.01:.1f}x")
         return await super().simulate_processing(request_id)
 
-class CircuitBreaker:
-    def __init__(self, failure_threshold: int, reset_timeout: float):
-        self.failure_threshold = failure_threshold
-        self.reset_timeout = reset_timeout
-        self.failures = 0
-        self.last_failure_time = 0
-        self.state = "CLOSED"  # CLOSED = normal, OPEN = stopped, HALF-OPEN = testing
-        self._lock = Lock()
-
-    def record_failure(self):
-        with self._lock:
-            self.failures += 1
-            self.last_failure_time = time.time()
-            if self.failures >= self.failure_threshold:
-                self.state = "OPEN"
-
-    def record_success(self):
-        with self._lock:
-            if self.state == "HALF-OPEN":
-                self.state = "CLOSED"
-                self.failures = 0
-
-    def allow_request(self) -> bool:
-        with self._lock:
-            if self.state == "CLOSED":
-                return True
-            elif self.state == "OPEN":
-                if time.time() - self.last_failure_time > self.reset_timeout:
-                    self.state = "HALF-OPEN"
-                    return True
-            return False
-
-class RateLimiter:
-    def __init__(self, requests_per_second: int):
-        self.rate = requests_per_second
-        self.tokens = requests_per_second
-        self.last_update = time.time()
-        self._lock = Lock()
-
-    def acquire(self) -> bool:
-        with self._lock:
-            now = time.time()
-            time_passed = now - self.last_update
-            self.tokens = min(self.rate, self.tokens + time_passed * self.rate)
-            self.last_update = now
-
-            if self.tokens >= 1:
-                self.tokens -= 1
-                return True
-            return False
-
 class LoadBalancer:
     def __init__(self):
         self.servers: List[Server] = []
-        self.retry_budget = RetryBudget(ratio=0.1)  # 10% retry budget
+        self.retry_budget = RetryBudget(ratio=0.1)
         self.metrics = RetryMetrics()
 
     def add_server(self, server: Server):
@@ -276,16 +181,14 @@ class LoadBalancer:
 
         success = await retryable_request.execute_with_retry(server)
 
-        # Update load balancer metrics
         self.metrics.total_requests += 1
         if success:
             self.metrics.successful_requests += 1
         else:
             self.metrics.failed_requests += 1
 
-        # Calculate current load amplification
         total_load = sum(s.current_load for s in self.servers)
-        normal_load = len(self.servers) * 0.5  # Assuming 50% normal load
+        normal_load = len(self.servers) * 0.5
         self.metrics.current_amplification = total_load / normal_load if normal_load > 0 else 1.0
 
         return success
@@ -298,15 +201,9 @@ class LoadBalancer:
 
     def print_metrics(self):
         print("\nSystem Metrics:")
-
-        # Track retries through retry budget
         total_retries = self.retry_budget.retry_count
         base_requests = self.metrics.total_requests - total_retries
-
-        # Calculate amplification including retries
         amplification = self.metrics.total_requests / max(1, base_requests) if base_requests > 0 else 1.0
-
-        # Calculate retry rate
         retry_rate = total_retries / max(1, self.metrics.total_requests)
 
         print(f"Load Amplification: {amplification:.2f}x")
@@ -315,14 +212,14 @@ class LoadBalancer:
         print(f"Retry Rate: {retry_rate:.1%}")
 
 async def monitor_and_report_metrics(lb: LoadBalancer, scenario_name: str, interval: float = 0.5):
-    """Monitor and report metrics with timestamps"""
+    start_time = time.time()
     try:
         while True:
             await asyncio.sleep(interval)
-            print(f"\n{scenario_name} Metrics at {time.time():.1f}s:")
+            elapsed = time.time() - start_time
+            print(f"\n{scenario_name} Metrics at {elapsed:.1f}s:")
             lb.print_metrics()
 
-            # Add additional monitoring for server states
             server_states = [
                 f"Server {s.id}: {s.status.value} (load: {s.current_load}/{s.capacity})"
                 for s in lb.servers
@@ -331,221 +228,197 @@ async def monitor_and_report_metrics(lb: LoadBalancer, scenario_name: str, inter
             for state in server_states:
                 print(state)
     except asyncio.CancelledError:
-        # Print final metrics
-        print(f"\nFinal {scenario_name} Metrics:")
+        elapsed = time.time() - start_time
+        print(f"\nFinal {scenario_name} Metrics at {elapsed:.1f}s:")
         lb.print_metrics()
 
-async def simulate_failure_scenario():
+async def run_scenario(name: str, func):
+    print(f"\n{'='*20}")
+    print(f" {name} ")
+    print(f"{'='*20}\n")
+    await func()
+    print(f"\nEnd of {name}\n")
+
+def reset_load_balancer(num_servers=3, capacity=5):
     lb = LoadBalancer()
-
-    # Add servers with very low capacity to make failures more likely
-    for i in range(3):
-        lb.add_server(Server(f"server{i}", capacity=5))
-
-    print("\n=== Scenario 1: Complete Server Failure ===")
-    print("Phase 1: Normal operation")
-    for i in range(10):
-        await lb.process_request(f"request_{i}")
-        await asyncio.sleep(0.05)
-    lb.print_metrics()
-
-    # Force server failure
-    print("\nForcing server1 to FAILED state...")
-    lb.servers[0].status = ServerStatus.FAILED
-
-    print("\nPhase 2: High load with failed server")
-    tasks = []
-    for i in range(20):
-        tasks.append(lb.process_request(f"request_fail_{i}"))
-        if len(tasks) >= 5:  # Send requests in batches of 5
-            await asyncio.gather(*tasks)
-            tasks = []
-            await asyncio.sleep(0.01)
-    if tasks:
-        await asyncio.gather(*tasks)
-    lb.print_metrics()
-
-    # Reset load balancer for next scenario
-    lb = LoadBalancer()
-    for i in range(3):
-        server = Server(f"server{i}", capacity=5)
-        server.processing_time = 0.05  # Increased base processing time
+    for i in range(num_servers):
+        server = Server(f"server{i}", capacity=capacity)
         lb.add_server(server)
+    return lb
 
-    print("\n--- Scenario 2: Load-induced Failures ---")
-    lb = LoadBalancer()
-    for i in range(3):
-        server = Server(f"server{i}", capacity=5)
-        server.processing_time = 0.05  # Slower base processing time
-        lb.add_server(server)
+async def simulate_failure_scenarios():
+    async def scenario_1():
+        lb = reset_load_balancer()
+        print("Phase 1: Normal operation")
+        for i in range(10):
+            await lb.process_request(f"request_{i}")
+            await asyncio.sleep(0.05)
+        lb.print_metrics()
 
-    print("Phase 1: Normal operation")
-    for i in range(10):
-        await lb.process_request(f"request_normal_{i}")
-        await asyncio.sleep(0.05)
-    lb.print_metrics()
+        print("\nForcing server1 to FAILED state...")
+        lb.servers[0].status = ServerStatus.FAILED
 
-    print("\nPhase 2: Extreme load")
-    tasks = []
-    for i in range(50):  # Increased load
-        tasks.append(lb.process_request(f"request_load_{i}"))
-        if len(tasks) >= 15:  # Larger batches
+        print("\nPhase 2: High load with failed server")
+        tasks = []
+        for i in range(20):
+            tasks.append(lb.process_request(f"request_fail_{i}"))
+            if len(tasks) >= 5:
+                await asyncio.gather(*tasks)
+                tasks = []
+                await asyncio.sleep(0.01)
+        if tasks:
             await asyncio.gather(*tasks)
-            tasks = []
-            await asyncio.sleep(0.01)
-    if tasks:
-        await asyncio.gather(*tasks)
-    lb.print_metrics()
+        lb.print_metrics()
 
-    # Reset load balancer for final scenario
-    lb = LoadBalancer()
-    for i in range(3):
-        server = Server(f"server{i}", capacity=5)
-        server.processing_time = 0.05
-        lb.add_server(server)
+    async def scenario_2():
+        lb = reset_load_balancer()
+        for server in lb.servers:
+            server.processing_time = 0.05
 
-    print("\n=== Scenario 3: Degraded Performance ===")
-    print("Phase 1: Normal operation")
-    for i in range(10):
-        await lb.process_request(f"request_pre_{i}")
-        await asyncio.sleep(0.05)
-    lb.print_metrics()
+        print("Phase 1: Normal operation")
+        for i in range(10):
+            await lb.process_request(f"request_normal_{i}")
+            await asyncio.sleep(0.05)
+        lb.print_metrics()
 
-    print("\nDegrading all servers...")
-    for server in lb.servers:
-        server.status = ServerStatus.DEGRADED
-
-    print("\nPhase 2: Operating with degraded servers")
-    tasks = []
-    for i in range(20):
-        tasks.append(lb.process_request(f"request_deg_{i}"))
-        if len(tasks) >= 5:
+        print("\nPhase 2: Extreme load")
+        tasks = []
+        for i in range(50):
+            tasks.append(lb.process_request(f"request_load_{i}"))
+            if len(tasks) >= 15:
+                await asyncio.gather(*tasks)
+                tasks = []
+                await asyncio.sleep(0.01)
+        if tasks:
             await asyncio.gather(*tasks)
-            tasks = []
-            await asyncio.sleep(0.01)
-    if tasks:
-        await asyncio.gather(*tasks)
-    lb.print_metrics()
+        lb.print_metrics()
 
+    async def scenario_3():
+        lb = reset_load_balancer()
+        print("Phase 1: Normal operation")
+        for i in range(10):
+            await lb.process_request(f"request_pre_{i}")
+            await asyncio.sleep(0.05)
+        lb.print_metrics()
 
-    # Scenario 4: Cascading Failure
-    print("\n--- Scenario 4: Cascading Failure with Monitoring ---")
+        print("\nDegrading all servers...")
+        for server in lb.servers:
+            server.status = ServerStatus.DEGRADED
 
-    monitor_task = asyncio.create_task(
-        monitor_and_report_metrics(lb, "Cascading Failure", interval=0.2)  # Shorter interval
-    )
-
-    # Start with one failed server
-    lb.servers[0].status = ServerStatus.FAILED
-    print(f"\nInitial failure: Server {lb.servers[0].id} set to FAILED")
-
-    tasks = []
-    for i in range(30):
-        tasks.append(lb.process_request(f"request_cascade_{i}"))
-        if len(tasks) >= 5:
+        print("\nPhase 2: Operating with degraded servers")
+        tasks = []
+        for i in range(20):
+            tasks.append(lb.process_request(f"request_deg_{i}"))
+            if len(tasks) >= 5:
+                await asyncio.gather(*tasks)
+                tasks = []
+                await asyncio.sleep(0.01)
+        if tasks:
             await asyncio.gather(*tasks)
-            tasks = []
+        lb.print_metrics()
 
-            # More granular status updates
-            for server in lb.servers[1:]:
-                old_status = server.status
-                if server.current_load / server.capacity > 0.8:
-                    server.status = ServerStatus.DEGRADED
-                    if old_status != ServerStatus.DEGRADED:
-                        print(f"\nServer {server.id} degraded due to high load")
-                if server.current_load / server.capacity > 0.9:
-                    server.status = ServerStatus.FAILED
-                    if old_status != ServerStatus.FAILED:
-                        print(f"\nServer {server.id} failed due to overload")
+    async def scenario_4():
+        lb = reset_load_balancer()
+        monitor_task = asyncio.create_task(
+            monitor_and_report_metrics(lb, "Cascading Failure", interval=0.5)
+        )
 
-            await asyncio.sleep(0.01)
+        print("\nStarting with one failed server...")
+        lb.servers[0].status = ServerStatus.FAILED
 
-    if tasks:
-        await asyncio.gather(*tasks)
+        batch_size = 5
+        for i in range(30):
+            success = await lb.process_request(f"request_cascade_{i}")
 
-    # Ensure final metrics are printed
-    print("\nFinal Cascading Failure State:")
-    lb.print_metrics()
-    print("\nFinal Server States:")
-    for server in lb.servers:
-        print(f"Server {server.id}: {server.status.value} (load: {server.current_load}/{server.capacity})")
+            # Check servers after each batch
+            if i % batch_size == 0:
+                for server in lb.servers[1:]:
+                    load_ratio = server.current_load / server.capacity
+                    if load_ratio > 0.8 and server.status == ServerStatus.HEALTHY:
+                        server.status = ServerStatus.DEGRADED
+                        print(f"\nServer {server.id} degraded (load ratio: {load_ratio:.2f})")
+                    elif load_ratio > 0.9 and server.status == ServerStatus.DEGRADED:
+                        server.status = ServerStatus.FAILED
+                        print(f"\nServer {server.id} failed (load ratio: {load_ratio:.2f})")
 
-    monitor_task.cancel()
-
-    # Scenario 5: Degraded Performance Wave
-    print("\n--- Scenario 5: Degraded Performance Wave ---")
-    print("Servers gradually degrade and recover in sequence")
-
-    async def degrade_and_recover(server, delay_start, duration):
-        await asyncio.sleep(delay_start)
-        print(f"\nServer {server.id} starting degradation")
-        server.status = ServerStatus.DEGRADED
-        await asyncio.sleep(duration)
-        print(f"\nServer {server.id} recovering to healthy state")
-        server.status = ServerStatus.HEALTHY
-
-    # Start degradation cycles for each server
-    degrade_tasks = []
-    for i, server in enumerate(lb.servers):
-        degrade_tasks.append(asyncio.create_task(
-            degrade_and_recover(server, i * 0.5, 0.3)))
-
-    # Send constant traffic during degradation
-    request_tasks = []
-    for i in range(30):
-        request_tasks.append(lb.process_request(f"request_wave_{i}"))
-        if len(request_tasks) >= 5:
-            await asyncio.gather(*request_tasks)
-            request_tasks = []
             await asyncio.sleep(0.05)
 
-    await asyncio.gather(*degrade_tasks)
-    if request_tasks:
-        await asyncio.gather(*request_tasks)
-    lb.print_metrics()
+        monitor_task.cancel()
+        await asyncio.sleep(0.1)
 
-    # Scenario 6: Memory Leak Simulation
-    print("\n--- Scenario 6: Improved Memory Leak ---")
-    lb = LoadBalancer()
-    server = MemoryLeakServer("leaky_server", capacity=10)  # Using new MemoryLeakServer class
-    server.processing_time = 0.01
-    lb.add_server(server)
+    async def scenario_5():
+        lb = reset_load_balancer()
+        print("Servers gradually degrade and recover in sequence")
 
-    async def memory_leak_simulation(server):
-        try:
-            while True:
-                await asyncio.sleep(0.1)
-                old_processing_time = server.processing_time
-                server.processing_time *= 1.2
+        async def degrade_and_recover(server, delay_start, duration):
+            await asyncio.sleep(delay_start)
+            print(f"\nServer {server.id} starting degradation")
+            server.status = ServerStatus.DEGRADED
+            await asyncio.sleep(duration)
+            print(f"\nServer {server.id} recovering to healthy state")
+            server.status = ServerStatus.HEALTHY
 
-                # Log significant changes
-                if server.processing_time > old_processing_time * 1.5:
-                    print(f"\nSignificant performance degradation detected:")
-                    print(f"Processing time increased from {old_processing_time:.3f}s to {server.processing_time:.3f}s")
+        degrade_tasks = []
+        for i, server in enumerate(lb.servers):
+            degrade_tasks.append(asyncio.create_task(
+                degrade_and_recover(server, i * 0.5, 0.3)))
 
-                if server.processing_time > 0.1 and server.status == ServerStatus.HEALTHY:
-                    server.status = ServerStatus.DEGRADED
-                    print(f"\nServer status changed to DEGRADED (processing time: {server.processing_time:.3f}s)")
+        request_tasks = []
+        for i in range(30):
+            request_tasks.append(lb.process_request(f"request_wave_{i}"))
+            if len(request_tasks) >= 5:
+                await asyncio.gather(*request_tasks)
+                request_tasks = []
+                await asyncio.sleep(0.05)
 
-                if server.processing_time > 0.5 and server.status == ServerStatus.DEGRADED:
-                    server.status = ServerStatus.FAILED
-                    print(f"\nServer status changed to FAILED (processing time: {server.processing_time:.3f}s)")
-        except asyncio.CancelledError:
-            print("\nMemory leak simulation stopped")
+        await asyncio.gather(*degrade_tasks)
+        if request_tasks:
+            await asyncio.gather(*request_tasks)
+        lb.print_metrics()
 
-    leak_task = asyncio.create_task(memory_leak_simulation(server))
+    async def scenario_6():
+        lb = reset_load_balancer(num_servers=1, capacity=10)
+        server = MemoryLeakServer("leaky_server", capacity=10)
+        server.processing_time = 0.01
+        lb.servers[0] = server
 
-    for i in range(30):
-      success = await lb.process_request(f"request_leak_{i}")
-      if i % 5 == 0:
-          print(f"\nRequest batch {i//5} completed")
-          lb.print_metrics()
-      await asyncio.sleep(0.05)
+        async def memory_leak_simulation(server):
+            try:
+                while True:
+                    await asyncio.sleep(0.1)  # Faster degradation
+                    old_processing_time = server.processing_time
+                    server.processing_time *= 1.2  # More aggressive growth
 
-    leak_task.cancel()
+                    if server.processing_time > 0.1 and server.status == ServerStatus.HEALTHY:
+                        server.status = ServerStatus.DEGRADED
+                        print(f"\nServer status changed to DEGRADED (processing time: {server.processing_time:.3f}s)")
+                    elif server.processing_time > 0.5 and server.status == ServerStatus.DEGRADED:
+                        server.status = ServerStatus.FAILED
+                        print(f"\nServer status changed to FAILED (processing time: {server.processing_time:.3f}s)")
+            except asyncio.CancelledError:
+                print("\nMemory leak simulation stopped")
+
+        leak_task = asyncio.create_task(memory_leak_simulation(server))
+
+        for i in range(30):
+            success = await lb.process_request(f"request_leak_{i}")
+            if i % 5 == 0:
+                print(f"\nRequest batch {i//5} completed")
+                print(f"Current processing time: {server.processing_time:.3f}s")
+                lb.print_metrics()
+            await asyncio.sleep(0.05)
+
+        leak_task.cancel()
+        await asyncio.sleep(0.1)
+
+
+    # Run all scenarios
+    await run_scenario("Scenario 1: Complete Server Failure", scenario_1)
+    await run_scenario("Scenario 2: Load-induced Failures", scenario_2)
+    await run_scenario("Scenario 3: Degraded Performance", scenario_3)
+    await run_scenario("Scenario 4: Cascading Failure", scenario_4)
+    await run_scenario("Scenario 5: Degraded Performance Wave", scenario_5)
+    await run_scenario("Scenario 6: Memory Leak", scenario_6)
 
 if __name__ == "__main__":
-    async def main():
-        await simulate_failure_scenario()
-
-    asyncio.run(main())
+    asyncio.run(simulate_failure_scenarios())
