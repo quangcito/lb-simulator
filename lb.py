@@ -326,22 +326,26 @@ async def simulate_failure_scenarios():
         print("\nStarting with one failed server...")
         lb.servers[0].status = ServerStatus.FAILED
 
-        batch_size = 5
-        for i in range(30):
+        batch_size = 3  # Smaller batches to see progression better
+        total_requests = 30
+
+        for i in range(total_requests):
             success = await lb.process_request(f"request_cascade_{i}")
 
-            # Check servers after each batch
-            if i % batch_size == 0:
-                for server in lb.servers[1:]:
-                    load_ratio = server.current_load / server.capacity
-                    if load_ratio > 0.8 and server.status == ServerStatus.HEALTHY:
-                        server.status = ServerStatus.DEGRADED
-                        print(f"\nServer {server.id} degraded (load ratio: {load_ratio:.2f})")
-                    elif load_ratio > 0.9 and server.status == ServerStatus.DEGRADED:
-                        server.status = ServerStatus.FAILED
-                        print(f"\nServer {server.id} failed (load ratio: {load_ratio:.2f})")
+            print(f"\nCurrent load ratios:")
+            # Check servers more frequently
+            for server in lb.servers[1:]:
+                load_ratio = server.current_load / server.capacity
+                print(f"Server {server.id}: {load_ratio:.2f}")  # Add this line
 
-            await asyncio.sleep(0.05)
+                if server.status == ServerStatus.HEALTHY and load_ratio > 0.7:
+                    server.status = ServerStatus.DEGRADED
+                    print(f"\nServer {server.id} degraded (load ratio: {load_ratio:.2f})")
+                elif server.status == ServerStatus.DEGRADED and load_ratio > 0.9:
+                    server.status = ServerStatus.FAILED
+                    print(f"\nServer {server.id} failed (load ratio: {load_ratio:.2f})")
+
+            await asyncio.sleep(0.1)  # Longer sleep to allow load to build up
 
         monitor_task.cancel()
         await asyncio.sleep(0.1)
@@ -350,31 +354,43 @@ async def simulate_failure_scenarios():
         lb = reset_load_balancer()
         print("Servers gradually degrade and recover in sequence")
 
-        async def degrade_and_recover(server, delay_start, duration):
+        monitor_task = asyncio.create_task(
+            monitor_and_report_metrics(lb, "Performance Wave", interval=1.0)
+        )
+
+        async def degrade_and_recover(server, delay_start, degraded_duration):
             await asyncio.sleep(delay_start)
             print(f"\nServer {server.id} starting degradation")
+            print(f"Current load: {server.current_load}/{server.capacity}")  # Add this line
             server.status = ServerStatus.DEGRADED
-            await asyncio.sleep(duration)
+            server.processing_time *= 3
+            await asyncio.sleep(degraded_duration)
             print(f"\nServer {server.id} recovering to healthy state")
+            print(f"Current load: {server.current_load}/{server.capacity}")  # Add this line
+            server.processing_time /= 3
             server.status = ServerStatus.HEALTHY
 
+        # Start degradation cycles for each server
         degrade_tasks = []
         for i, server in enumerate(lb.servers):
             degrade_tasks.append(asyncio.create_task(
-                degrade_and_recover(server, i * 0.5, 0.3)))
+                degrade_and_recover(server, i * 1.0, 0.8)))  # Longer duration
 
+        # Send constant traffic during degradation
         request_tasks = []
         for i in range(30):
             request_tasks.append(lb.process_request(f"request_wave_{i}"))
-            if len(request_tasks) >= 5:
+            if len(request_tasks) >= 3:  # Smaller batches
                 await asyncio.gather(*request_tasks)
                 request_tasks = []
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.1)  # Longer sleep between batches
 
         await asyncio.gather(*degrade_tasks)
         if request_tasks:
             await asyncio.gather(*request_tasks)
-        lb.print_metrics()
+
+        monitor_task.cancel()
+        await asyncio.sleep(0.1)
 
     async def scenario_6():
         lb = reset_load_balancer(num_servers=1, capacity=10)
