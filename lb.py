@@ -387,6 +387,77 @@ async def simulate_failure_scenario():
             await asyncio.sleep(0.01)
     if tasks:
         await asyncio.gather(*tasks)
+
+    # Scenario 1: Cascading Failure
+    print("\n--- Scenario 4: Cascading Failure ---")
+    print("One server fails, increasing load on others until they fail too")
+
+    # Force first server to fail
+    lb.servers[0].status = ServerStatus.FAILED
+    tasks = []
+    for i in range(20):
+        tasks.append(lb.process_request(f"request_cascade_{i}"))
+        if len(tasks) >= 5:
+            await asyncio.gather(*tasks)
+            tasks = []
+            await asyncio.sleep(0.01)
+    if tasks:
+        await asyncio.gather(*tasks)
+    lb.print_metrics()
+
+    # Reset load balancer for next scenario
+    lb = LoadBalancer()
+    for i in range(3):
+        server = Server(f"server{i}", capacity=5)
+        lb.add_server(server)
+
+    # Scenario 2: Degraded Performance Wave
+    print("\n--- Scenario 5: Degraded Performance Wave ---")
+    print("Servers gradually degrade and recover in sequence")
+
+    async def degrade_and_recover(server, delay_start, duration):
+        await asyncio.sleep(delay_start)
+        server.status = ServerStatus.DEGRADED
+        await asyncio.sleep(duration)
+        server.status = ServerStatus.HEALTHY
+
+    # Start degradation cycles for each server
+    degrade_tasks = []
+    for i, server in enumerate(lb.servers):
+        degrade_tasks.append(asyncio.create_task(
+            degrade_and_recover(server, i * 0.5, 0.3)))
+
+    # Send constant traffic during degradation
+    request_tasks = []
+    for i in range(30):
+        request_tasks.append(lb.process_request(f"request_wave_{i}"))
+        if len(request_tasks) >= 5:
+            await asyncio.gather(*request_tasks)
+            request_tasks = []
+            await asyncio.sleep(0.05)
+
+    await asyncio.gather(*degrade_tasks)
+    if request_tasks:
+        await asyncio.gather(*request_tasks)
+    lb.print_metrics()
+
+    # Scenario 3: Memory Leak Simulation
+    print("\n--- Scenario 6: Memory Leak Simulation ---")
+    print("Server gradually slows down as 'memory' increases")
+
+    lb = LoadBalancer()
+    server = Server("leaky_server", capacity=10)
+    server.processing_time = 0.01  # Start with fast processing
+    lb.add_server(server)
+
+    for i in range(30):
+        # Simulate memory leak by gradually increasing processing time
+        server.processing_time *= 1.2
+
+        await lb.process_request(f"request_leak_{i}")
+        await asyncio.sleep(0.05)
+
+
     lb.print_metrics()
 
 if __name__ == "__main__":
