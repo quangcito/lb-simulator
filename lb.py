@@ -192,6 +192,17 @@ class Server:
 
         return False
 
+class MemoryLeakServer(Server):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.peak_processing_time = self.processing_time
+
+    async def simulate_processing(self, request_id: str) -> bool:
+        if self.processing_time > self.peak_processing_time:
+            self.peak_processing_time = self.processing_time
+            print(f"\nNew peak processing time: {self.processing_time:.3f}s")
+            print(f"Degradation factor: {self.processing_time / 0.01:.1f}x")
+        return await super().simulate_processing(request_id)
 
 class CircuitBreaker:
     def __init__(self, failure_threshold: int, reset_timeout: float):
@@ -303,6 +314,27 @@ class LoadBalancer:
         print(f"Success Rate: {(self.metrics.successful_requests / max(1, self.metrics.total_requests)):.1%}")
         print(f"Retry Rate: {retry_rate:.1%}")
 
+async def monitor_and_report_metrics(lb: LoadBalancer, scenario_name: str, interval: float = 0.5):
+    """Monitor and report metrics with timestamps"""
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            print(f"\n{scenario_name} Metrics at {time.time():.1f}s:")
+            lb.print_metrics()
+
+            # Add additional monitoring for server states
+            server_states = [
+                f"Server {s.id}: {s.status.value} (load: {s.current_load}/{s.capacity})"
+                for s in lb.servers
+            ]
+            print("\nServer States:")
+            for state in server_states:
+                print(state)
+    except asyncio.CancelledError:
+        # Print final metrics
+        print(f"\nFinal {scenario_name} Metrics:")
+        lb.print_metrics()
+
 async def simulate_failure_scenario():
     lb = LoadBalancer()
 
@@ -340,18 +372,24 @@ async def simulate_failure_scenario():
         server.processing_time = 0.05  # Increased base processing time
         lb.add_server(server)
 
-    print("\n=== Scenario 2: Load-induced Failures ===")
+    print("\n--- Scenario 2: Load-induced Failures ---")
+    lb = LoadBalancer()
+    for i in range(3):
+        server = Server(f"server{i}", capacity=5)
+        server.processing_time = 0.05  # Slower base processing time
+        lb.add_server(server)
+
     print("Phase 1: Normal operation")
     for i in range(10):
         await lb.process_request(f"request_normal_{i}")
         await asyncio.sleep(0.05)
     lb.print_metrics()
 
-    print("\nPhase 2: Extreme load (should cause load-based failures)")
+    print("\nPhase 2: Extreme load")
     tasks = []
-    for i in range(30):
+    for i in range(50):  # Increased load
         tasks.append(lb.process_request(f"request_load_{i}"))
-        if len(tasks) >= 10:  # Send requests in batches of 10
+        if len(tasks) >= 15:  # Larger batches
             await asyncio.gather(*tasks)
             tasks = []
             await asyncio.sleep(0.01)
@@ -387,38 +425,63 @@ async def simulate_failure_scenario():
             await asyncio.sleep(0.01)
     if tasks:
         await asyncio.gather(*tasks)
+    lb.print_metrics()
 
-    # Scenario 1: Cascading Failure
-    print("\n--- Scenario 4: Cascading Failure ---")
-    print("One server fails, increasing load on others until they fail too")
 
-    # Force first server to fail
+    # Scenario 4: Cascading Failure
+    print("\n--- Scenario 4: Cascading Failure with Monitoring ---")
+
+    monitor_task = asyncio.create_task(
+        monitor_and_report_metrics(lb, "Cascading Failure", interval=0.2)  # Shorter interval
+    )
+
+    # Start with one failed server
     lb.servers[0].status = ServerStatus.FAILED
+    print(f"\nInitial failure: Server {lb.servers[0].id} set to FAILED")
+
     tasks = []
-    for i in range(20):
+    for i in range(30):
         tasks.append(lb.process_request(f"request_cascade_{i}"))
         if len(tasks) >= 5:
             await asyncio.gather(*tasks)
             tasks = []
+
+            # More granular status updates
+            for server in lb.servers[1:]:
+                old_status = server.status
+                if server.current_load / server.capacity > 0.8:
+                    server.status = ServerStatus.DEGRADED
+                    if old_status != ServerStatus.DEGRADED:
+                        print(f"\nServer {server.id} degraded due to high load")
+                if server.current_load / server.capacity > 0.9:
+                    server.status = ServerStatus.FAILED
+                    if old_status != ServerStatus.FAILED:
+                        print(f"\nServer {server.id} failed due to overload")
+
             await asyncio.sleep(0.01)
+
     if tasks:
         await asyncio.gather(*tasks)
+
+    # Ensure final metrics are printed
+    print("\nFinal Cascading Failure State:")
     lb.print_metrics()
+    print("\nFinal Server States:")
+    for server in lb.servers:
+        print(f"Server {server.id}: {server.status.value} (load: {server.current_load}/{server.capacity})")
 
-    # Reset load balancer for next scenario
-    lb = LoadBalancer()
-    for i in range(3):
-        server = Server(f"server{i}", capacity=5)
-        lb.add_server(server)
+    monitor_task.cancel()
 
-    # Scenario 2: Degraded Performance Wave
+    # Scenario 5: Degraded Performance Wave
     print("\n--- Scenario 5: Degraded Performance Wave ---")
     print("Servers gradually degrade and recover in sequence")
 
     async def degrade_and_recover(server, delay_start, duration):
         await asyncio.sleep(delay_start)
+        print(f"\nServer {server.id} starting degradation")
         server.status = ServerStatus.DEGRADED
         await asyncio.sleep(duration)
+        print(f"\nServer {server.id} recovering to healthy state")
         server.status = ServerStatus.HEALTHY
 
     # Start degradation cycles for each server
@@ -441,24 +504,45 @@ async def simulate_failure_scenario():
         await asyncio.gather(*request_tasks)
     lb.print_metrics()
 
-    # Scenario 3: Memory Leak Simulation
-    print("\n--- Scenario 6: Memory Leak Simulation ---")
-    print("Server gradually slows down as 'memory' increases")
-
+    # Scenario 6: Memory Leak Simulation
+    print("\n--- Scenario 6: Improved Memory Leak ---")
     lb = LoadBalancer()
-    server = Server("leaky_server", capacity=10)
-    server.processing_time = 0.01  # Start with fast processing
+    server = MemoryLeakServer("leaky_server", capacity=10)  # Using new MemoryLeakServer class
+    server.processing_time = 0.01
     lb.add_server(server)
 
+    async def memory_leak_simulation(server):
+        try:
+            while True:
+                await asyncio.sleep(0.1)
+                old_processing_time = server.processing_time
+                server.processing_time *= 1.2
+
+                # Log significant changes
+                if server.processing_time > old_processing_time * 1.5:
+                    print(f"\nSignificant performance degradation detected:")
+                    print(f"Processing time increased from {old_processing_time:.3f}s to {server.processing_time:.3f}s")
+
+                if server.processing_time > 0.1 and server.status == ServerStatus.HEALTHY:
+                    server.status = ServerStatus.DEGRADED
+                    print(f"\nServer status changed to DEGRADED (processing time: {server.processing_time:.3f}s)")
+
+                if server.processing_time > 0.5 and server.status == ServerStatus.DEGRADED:
+                    server.status = ServerStatus.FAILED
+                    print(f"\nServer status changed to FAILED (processing time: {server.processing_time:.3f}s)")
+        except asyncio.CancelledError:
+            print("\nMemory leak simulation stopped")
+
+    leak_task = asyncio.create_task(memory_leak_simulation(server))
+
     for i in range(30):
-        # Simulate memory leak by gradually increasing processing time
-        server.processing_time *= 1.2
+      success = await lb.process_request(f"request_leak_{i}")
+      if i % 5 == 0:
+          print(f"\nRequest batch {i//5} completed")
+          lb.print_metrics()
+      await asyncio.sleep(0.05)
 
-        await lb.process_request(f"request_leak_{i}")
-        await asyncio.sleep(0.05)
-
-
-    lb.print_metrics()
+    leak_task.cancel()
 
 if __name__ == "__main__":
     async def main():
